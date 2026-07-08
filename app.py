@@ -1,366 +1,410 @@
 import io
 import time
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import requests
 import streamlit as st
 
-try:
-    import yfinance as yf
-except Exception:
-    yf = None
+st.set_page_config(page_title="ALS Stock Finder", page_icon="🔎", layout="wide")
 
-BASE_URL = "https://financialmodelingprep.com/stable"
+FMP_BASE = "https://financialmodelingprep.com/api/v3"
 
-st.set_page_config(page_title="ALS Stock Finder", layout="wide")
+st.markdown("""
+<style>
+.metric-card {background:#111827; border:1px solid #293244; border-radius:14px; padding:18px;}
+.good {color:#22c55e; font-weight:700}
+.warn {color:#f59e0b; font-weight:700}
+.bad {color:#ef4444; font-weight:700}
+.small {font-size:0.9rem; color:#9ca3af}
+</style>
+""", unsafe_allow_html=True)
 
-DEFAULT_TICKERS = [
-    "AAPL", "MSFT", "NVDA", "META", "GOOGL", "AMZN", "AVGO", "COST", "AMD", "NFLX",
-    "ADBE", "CRM", "NOW", "PANW", "CRWD", "INTU", "LRCX", "KLAC", "AMAT", "QCOM",
-    "TSLA", "ORCL", "CSCO", "TXN", "MU", "IBM", "UBER", "SHOP", "SNOW", "PLTR"
-]
+
+def get_secret_key() -> str:
+    try:
+        return st.secrets.get("FMP_API_KEY", "")
+    except Exception:
+        return ""
 
 
-def fmp_get(endpoint: str, params: Dict[str, Any]) -> Any:
-    url = f"{BASE_URL}/{endpoint}"
+def fmp_get(path: str, api_key: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    if not api_key:
+        raise ValueError("חסר FMP API Key")
+    params = params or {}
+    params["apikey"] = api_key
+    url = f"{FMP_BASE}/{path.lstrip('/')}"
     r = requests.get(url, params=params, timeout=25)
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    if isinstance(data, dict) and data.get("Error Message"):
+        raise RuntimeError(data.get("Error Message"))
+    return data
 
 
-def first_item(data: Any) -> Dict[str, Any]:
-    if isinstance(data, list) and data:
-        return data[0] or {}
-    if isinstance(data, dict):
-        return data
-    return {}
+@st.cache_data(ttl=60*60*12, show_spinner=False)
+def load_sp500(api_key: str) -> List[str]:
+    data = fmp_get("sp500_constituent", api_key)
+    return sorted([x.get("symbol") for x in data if x.get("symbol")])
 
 
-def val(d: Dict[str, Any], keys: List[str]) -> Optional[float]:
+@st.cache_data(ttl=60*60*4, show_spinner=False)
+def fetch_quote_batch(symbols: tuple, api_key: str) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    chunk_size = 80
+    symbols = tuple([s.strip().upper() for s in symbols if s.strip()])
+    for i in range(0, len(symbols), chunk_size):
+        chunk = symbols[i:i+chunk_size]
+        data = fmp_get("quote/" + ",".join(chunk), api_key)
+        if isinstance(data, list):
+            for row in data:
+                if row.get("symbol"):
+                    out[row["symbol"].upper()] = row
+        time.sleep(0.15)
+    return out
+
+
+@st.cache_data(ttl=60*60*12, show_spinner=False)
+def fetch_company_data(symbol: str, api_key: str) -> Dict[str, Any]:
+    symbol = symbol.upper()
+    result: Dict[str, Any] = {"ticker": symbol}
+    endpoints = {
+        "profile": f"profile/{symbol}",
+        "ratios": f"ratios-ttm/{symbol}",
+        "metrics": f"key-metrics-ttm/{symbol}",
+        "growth": f"financial-growth/{symbol}",
+    }
+    for key, path in endpoints.items():
+        try:
+            data = fmp_get(path, api_key)
+            result[key] = data[0] if isinstance(data, list) and data else {}
+        except Exception as e:
+            result[key] = {"_error": str(e)}
+        time.sleep(0.08)
+    return result
+
+
+def pct(x: Any) -> Optional[float]:
+    if x is None or x == "":
+        return None
+    try:
+        x = float(x)
+        if abs(x) <= 1.5:
+            return x * 100
+        return x
+    except Exception:
+        return None
+
+
+def val(d: Dict[str, Any], *keys: str) -> Optional[float]:
     for k in keys:
-        if k in d and d[k] not in (None, "", "None"):
+        if k in d and d[k] not in (None, ""):
             try:
                 return float(d[k])
             except Exception:
-                pass
+                continue
     return None
 
 
-def pct(x):
-    if x is None or pd.isna(x):
-        return None
-    return x * 100 if abs(x) <= 2 else x
+def safe_score(value: Optional[float], min_v: float, great_v: float, cap: float = 100) -> float:
+    if value is None or np.isnan(value):
+        return 35.0
+    if value <= min_v:
+        return max(0, (value / min_v) * 50) if min_v != 0 else 0
+    if value >= great_v:
+        return cap
+    return 50 + 50 * ((value - min_v) / (great_v - min_v))
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_symbol_data(symbol: str, api_key: str) -> Dict[str, Any]:
-    params = {"symbol": symbol, "apikey": api_key}
-    quote = first_item(fmp_get("quote", params))
-    profile = first_item(fmp_get("profile", params))
-    ratios_ttm = first_item(fmp_get("ratios-ttm", params))
-    metrics_ttm = first_item(fmp_get("key-metrics-ttm", params))
-    estimates = first_item(fmp_get("analyst-estimates", {"symbol": symbol, "period": "annual", "apikey": api_key}))
+def inverse_score(value: Optional[float], good: float, bad: float) -> float:
+    if value is None or np.isnan(value):
+        return 45.0
+    if value <= good:
+        return 100.0
+    if value >= bad:
+        return 0.0
+    return 100 * (bad - value) / (bad - good)
 
-    price = val(quote, ["price"])
-    ma50 = val(quote, ["priceAvg50", "priceAvg50d"])
-    ma200 = val(quote, ["priceAvg200", "priceAvg200d"])
-    pe = val(quote, ["pe", "peRatio"]) or val(metrics_ttm, ["peRatioTTM", "peRatio"])
-    eps = val(quote, ["eps"]) or val(metrics_ttm, ["netIncomePerShareTTM", "netIncomePerShare"])
-    forward_eps = val(estimates, ["estimatedEpsAvg", "epsAvg", "estimatedEpsHigh"])
-    forward_pe = (price / forward_eps) if price and forward_eps and forward_eps > 0 else None
+
+def build_row(symbol: str, q: Dict[str, Any], cd: Dict[str, Any]) -> Dict[str, Any]:
+    profile = cd.get("profile", {})
+    ratios = cd.get("ratios", {})
+    metrics = cd.get("metrics", {})
+    growth = cd.get("growth", {})
+
+    price = val(q, "price")
+    ma50 = val(q, "priceAvg50")
+    ma200 = val(q, "priceAvg200")
+    pe = val(q, "pe") or val(metrics, "peRatioTTM")
+    eps = val(q, "eps") or val(metrics, "netIncomePerShareTTM")
+    ps = val(metrics, "priceToSalesRatioTTM")
+    quick = val(ratios, "quickRatioTTM")
+    roe = pct(val(ratios, "returnOnEquityTTM"))
+    roic = pct(val(ratios, "returnOnInvestedCapitalTTM")) or pct(val(ratios, "returnOnCapitalEmployedTTM"))
+    gross = pct(val(ratios, "grossProfitMarginTTM"))
+    operating = pct(val(ratios, "operatingProfitMarginTTM"))
+    profit = pct(val(ratios, "netProfitMarginTTM"))
+    revenue_growth = pct(val(growth, "revenueGrowth"))
+    eps_growth = pct(val(growth, "epsgrowth", "epsGrowth"))
+    debt_equity = val(ratios, "debtEquityRatioTTM")
+    current_ratio = val(ratios, "currentRatioTTM")
+    fcf = val(metrics, "freeCashFlowPerShareTTM")
+    market_cap = val(profile, "mktCap") or val(q, "marketCap")
+
+    # FMP free tiers often don't provide forward PE/EPS consistently in v3. Approximate if EPS growth is available.
+    forward_eps = None
+    if eps is not None and eps_growth is not None:
+        forward_eps = eps * (1 + eps_growth / 100)
+    forward_pe = None
+    if price is not None and forward_eps not in (None, 0):
+        forward_pe = price / forward_eps if forward_eps and forward_eps > 0 else None
+
+    above50 = bool(price is not None and ma50 is not None and price > ma50)
+    above200 = bool(price is not None and ma200 is not None and price > ma200)
+    pe_improves = bool(pe is not None and forward_pe is not None and pe > forward_pe)
+
+    quality = np.mean([
+        safe_score(roe, 12, 30), safe_score(roic, 9, 20),
+        safe_score(gross, 38, 55), safe_score(profit, 7, 20)
+    ])
+    growth_score = np.mean([safe_score(revenue_growth, 5, 20), safe_score(eps_growth, 8, 25), safe_score(forward_eps, eps or 0.01, (eps or 0.01)*1.25) if eps and forward_eps else 45])
+    valuation = np.mean([inverse_score(pe, 18, 60), inverse_score(ps, 3, 18), 90 if pe_improves else 35])
+    trend = np.mean([100 if above50 else 25, 100 if above200 else 35])
+    final = 0.35*quality + 0.25*growth_score + 0.20*valuation + 0.20*trend
+
+    risk_flags = []
+    if debt_equity is not None and debt_equity > 1.5: risk_flags.append("Debt/Equity גבוה")
+    if profit is not None and profit < 7: risk_flags.append("Profit Margin נמוך")
+    if gross is not None and gross < 38: risk_flags.append("Gross Margin נמוך")
+    if not above50: risk_flags.append("מתחת ל-MA50")
+    if ps is not None and ps > 12: risk_flags.append("P/S גבוה")
+    if eps is not None and eps <= 0: risk_flags.append("EPS שלילי")
+    if revenue_growth is not None and revenue_growth < 0: risk_flags.append("ירידה בהכנסות")
+
+    if final >= 85 and len(risk_flags) <= 1:
+        rec = "Strong Candidate"
+    elif final >= 70:
+        rec = "Watch"
+    else:
+        rec = "Speculative / Ignore"
 
     return {
-        "Ticker": symbol,
-        "Company": profile.get("companyName") or quote.get("name") or "",
-        "Sector": profile.get("sector", ""),
-        "Industry": profile.get("industry", ""),
-        "Price": price,
-        "MA50": ma50,
-        "MA200": ma200,
-        "Above MA50": bool(price and ma50 and price > ma50),
-        "Above MA200": bool(price and ma200 and price > ma200),
-        "P/E": pe,
-        "Forward P/E": forward_pe,
-        "P/S": val(metrics_ttm, ["priceToSalesRatioTTM", "priceToSalesRatio"]),
-        "Quick Ratio": val(ratios_ttm, ["quickRatioTTM", "quickRatio"]),
-        "ROE": val(ratios_ttm, ["returnOnEquityTTM", "returnOnEquity"]),
-        "ROIC/ROI": val(metrics_ttm, ["roicTTM", "roic"]) or val(ratios_ttm, ["returnOnCapitalEmployedTTM", "returnOnCapitalEmployed"]),
-        "EPS": eps,
-        "Forward EPS": forward_eps,
-        "Gross Margin": val(ratios_ttm, ["grossProfitMarginTTM", "grossProfitMargin"]),
-        "Operating Margin": val(ratios_ttm, ["operatingProfitMarginTTM", "operatingProfitMargin"]),
-        "Profit Margin": val(ratios_ttm, ["netProfitMarginTTM", "netProfitMargin"]),
-        "Debt/Equity": val(ratios_ttm, ["debtEquityRatioTTM", "debtEquityRatio"]),
-        "Market Cap": val(profile, ["mktCap", "marketCap"]) or val(quote, ["marketCap"]),
+        "Ticker": symbol, "Company": profile.get("companyName") or q.get("name"), "Sector": profile.get("sector"),
+        "Industry": profile.get("industry"), "Price": price, "Market Cap": market_cap,
+        "MA50": ma50, "MA200": ma200, "Above MA50": above50, "Above MA200": above200,
+        "P/E": pe, "Forward P/E*": forward_pe, "P/S": ps, "Quick Ratio": quick, "Current Ratio": current_ratio,
+        "ROE %": roe, "ROIC/ROI %": roic, "EPS": eps, "Forward EPS*": forward_eps,
+        "Revenue Growth %": revenue_growth, "EPS Growth %": eps_growth,
+        "Gross Margin %": gross, "Operating Margin %": operating, "Profit Margin %": profit,
+        "Debt/Equity": debt_equity, "FCF/Share": fcf,
+        "Quality": round(float(quality), 1), "Growth": round(float(growth_score), 1), "Valuation": round(float(valuation), 1), "Trend": round(float(trend), 1),
+        "Amir Score": round(float(final), 1), "Risk Flags": "; ".join(risk_flags), "Recommendation": rec,
     }
 
 
-def score_row(row: pd.Series) -> float:
-    score = 0.0
-    if row.get("Above MA50"):
-        score += 12
-    if row.get("Above MA200"):
-        score += 8
-
-    pe, fpe = row.get("P/E"), row.get("Forward P/E")
-    if pd.notna(pe) and pd.notna(fpe) and pe > fpe:
-        score += 12
-    ps = row.get("P/S")
-    if pd.notna(ps):
-        score += max(0, min(8, 8 * (12 - min(ps, 12)) / 12))
-
-    roe = pct(row.get("ROE")); roic = pct(row.get("ROIC/ROI")); gm = pct(row.get("Gross Margin")); pm = pct(row.get("Profit Margin")); qr = row.get("Quick Ratio")
-    if roe is not None:
-        score += min(15, max(0, (roe / 30) * 15))
-    if roic is not None:
-        score += min(12, max(0, (roic / 20) * 12))
-    if gm is not None:
-        score += min(13, max(0, (gm / 45) * 13))
-    if pm is not None:
-        score += min(13, max(0, (pm / 20) * 13))
-    if pd.notna(qr):
-        score += min(7, max(0, (qr / 2) * 7))
-    return round(min(score, 100), 1)
-
-
-def risk_flags(row: pd.Series) -> str:
-    flags = []
-    if pd.notna(row.get("Debt/Equity")) and row.get("Debt/Equity") > 2:
-        flags.append("חוב גבוה")
-    if pct(row.get("Profit Margin")) is not None and pct(row.get("Profit Margin")) < 7:
-        flags.append("שולי רווח נמוכים")
-    if pd.notna(row.get("P/S")) and row.get("P/S") > 12:
-        flags.append("P/S גבוה")
-    if not row.get("Above MA50"):
-        flags.append("מתחת MA50")
-    if pd.isna(row.get("Forward P/E")):
-        flags.append("חסר Forward P/E")
-    return ", ".join(flags) if flags else ""
-
-
-def pass_filters(row: pd.Series, cfg: Dict[str, Any], mode: str) -> bool:
-    checks = []
-    # Strict: כל התנאים חובה
+def passes_mode(row: pd.Series, mode: str, thresholds: Dict[str, float]) -> bool:
+    strict = (
+        bool(row.get("Above MA50")) and
+        row.get("P/E", np.nan) > row.get("Forward P/E*", np.inf) and
+        row.get("Quick Ratio", 0) >= thresholds["quick"] and
+        row.get("ROE %", 0) >= thresholds["roe"] and
+        row.get("ROIC/ROI %", 0) >= thresholds["roic"] and
+        row.get("Gross Margin %", 0) >= thresholds["gross"] and
+        row.get("Profit Margin %", 0) >= thresholds["profit"]
+    )
     if mode == "Strict":
-        checks = [
-            bool(row.get("Above MA50")),
-            pd.notna(row.get("P/E")) and pd.notna(row.get("Forward P/E")) and row.get("P/E") > row.get("Forward P/E"),
-            pd.notna(row.get("Quick Ratio")) and row.get("Quick Ratio") >= cfg["min_quick_ratio"],
-            pct(row.get("ROE")) is not None and pct(row.get("ROE")) >= cfg["min_roe"],
-            pct(row.get("ROIC/ROI")) is not None and pct(row.get("ROIC/ROI")) >= cfg["min_roic"],
-            pct(row.get("Gross Margin")) is not None and pct(row.get("Gross Margin")) >= cfg["min_gross_margin"],
-            pct(row.get("Profit Margin")) is not None and pct(row.get("Profit Margin")) >= cfg["min_profit_margin"],
-        ]
-        return all(checks)
-
-    # Balanced: תנאי ליבה + ציון מינימלי
+        return strict
     if mode == "Balanced":
-        core = [
-            bool(row.get("Above MA50")),
-            pd.notna(row.get("Quick Ratio")) and row.get("Quick Ratio") >= max(0.8, cfg["min_quick_ratio"] * 0.8),
-            pct(row.get("ROE")) is not None and pct(row.get("ROE")) >= max(8, cfg["min_roe"] * 0.75),
-            pct(row.get("Profit Margin")) is not None and pct(row.get("Profit Margin")) > 0,
-        ]
-        return all(core) and row.get("Amir Score", 0) >= 60
-
-    # Opportunistic: לא מסנן קשיח — מכניס מועמדות עם ציון ונותן דגלי סיכון
+        core = bool(row.get("Above MA50")) and row.get("Quick Ratio", 0) >= 0.8 and row.get("Profit Margin %", -999) > 0 and row.get("ROE %", 0) >= 8
+        return core and row.get("Amir Score", 0) >= 60
     return row.get("Amir Score", 0) >= 50
 
 
-def recommendation(score: float, flags: str, mode: str) -> str:
-    risk_count = 0 if not flags else len(flags.split(","))
-    if score >= 85 and risk_count <= 1:
-        return "Strong Candidate"
-    if score >= 70 and risk_count <= 2:
-        return "Watch"
-    if mode == "Opportunistic" and score >= 50:
-        return "Speculative"
-    return "Ignore"
-
-
-def to_excel(df: pd.DataFrame) -> bytes:
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="ALS Results")
-    return out.getvalue()
+    return bio.getvalue()
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def yf_prices(tickers: List[str], start: str, end: str) -> pd.DataFrame:
-    if yf is None:
-        raise RuntimeError("yfinance לא מותקן")
-    data = yf.download(tickers, start=start, end=end, auto_adjust=True, progress=False, group_by="ticker")
-    if len(tickers) == 1:
-        return data[["Close"]].rename(columns={"Close": tickers[0]})
-    close = pd.DataFrame({t: data[t]["Close"] for t in tickers if t in data.columns.levels[0]})
-    return close.dropna(how="all")
+@st.cache_data(ttl=60*60*12, show_spinner=False)
+def historical_prices(symbol: str, api_key: str, from_date: str, to_date: str) -> pd.DataFrame:
+    data = fmp_get(f"historical-price-full/{symbol}", api_key, {"from": from_date, "to": to_date})
+    hist = data.get("historical", []) if isinstance(data, dict) else []
+    df = pd.DataFrame(hist)
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date")
+    return df[["date", "close"]]
 
 
-def backtest_momentum(tickers: List[str], start: str, end: str, ma_window: int, rebalance: str, top_n: int):
-    all_tickers = list(dict.fromkeys(tickers + ["SPY"]))
-    prices = yf_prices(all_tickers, start, end)
-    if prices.empty or "SPY" not in prices.columns:
-        return pd.DataFrame(), pd.DataFrame()
-    stocks = [t for t in tickers if t in prices.columns]
-    prices = prices[stocks + ["SPY"]].dropna(how="all")
-    ma = prices[stocks].rolling(ma_window).mean()
-    ma_slope = ma.diff(20) > 0
-    signals = (prices[stocks] > ma) & ma_slope
-    returns = prices[stocks].pct_change().fillna(0)
-    spy_ret = prices["SPY"].pct_change().fillna(0)
+def app_sidebar():
+    st.sidebar.title("הגדרות")
+    key_default = get_secret_key()
+    api_key = st.sidebar.text_input("FMP API Key", value=key_default, type="password")
+    st.sidebar.divider()
+    mode = st.sidebar.radio("סגנון סינון", ["Strict", "Balanced", "Opportunistic"], index=1)
+    st.sidebar.caption("Strict = קשיח; Balanced = מומלץ; Opportunistic = יותר תוצאות עם יותר סיכון")
+    st.sidebar.divider()
+    source = st.sidebar.radio("יקום מניות", ["רשימת דוגמה", "S&P 500 דרך FMP", "CSV העלאה", "הדבקה ידנית"], index=0)
+    max_tickers = st.sidebar.slider("מספר טיקרים לסריקה", 10, 500, 50, 10)
+    st.sidebar.divider()
+    st.sidebar.subheader("ספי בסיס")
+    thresholds = {
+        "quick": st.sidebar.number_input("Quick Ratio מינימלי", value=1.0, step=0.1),
+        "roe": st.sidebar.number_input("ROE % מינימלי", value=12.0, step=1.0),
+        "roic": st.sidebar.number_input("ROIC/ROI % מינימלי", value=9.0, step=1.0),
+        "gross": st.sidebar.number_input("Gross Margin % מינימלי", value=38.0, step=1.0),
+        "profit": st.sidebar.number_input("Profit Margin % מינימלי", value=7.0, step=1.0),
+    }
+    return api_key, mode, source, max_tickers, thresholds
 
-    if rebalance == "חודשי":
-        rebalance_dates = prices.resample("ME").last().index
+
+def get_tickers(source: str, api_key: str, max_tickers: int) -> List[str]:
+    if source == "רשימת דוגמה":
+        try:
+            df = pd.read_csv("tickers_sample.csv")
+            tickers = df.iloc[:, 0].astype(str).str.upper().tolist()
+        except Exception:
+            tickers = ["AAPL", "MSFT", "NVDA", "META", "GOOGL", "AMZN"]
+    elif source == "S&P 500 דרך FMP":
+        tickers = load_sp500(api_key)
+    elif source == "CSV העלאה":
+        file = st.sidebar.file_uploader("העלה CSV עם עמודת ticker", type=["csv"])
+        if not file:
+            return []
+        df = pd.read_csv(file)
+        col = "ticker" if "ticker" in df.columns else df.columns[0]
+        tickers = df[col].astype(str).str.upper().tolist()
     else:
-        rebalance_dates = prices.resample("QE").last().index
-
-    weights = pd.DataFrame(0.0, index=prices.index, columns=stocks)
-    for d in rebalance_dates:
-        if d not in prices.index:
-            idx = prices.index.searchsorted(d)
-            if idx >= len(prices.index):
-                continue
-            d = prices.index[idx]
-        eligible = signals.loc[d]
-        chosen = eligible[eligible].index.tolist()[:top_n]
-        if chosen:
-            weights.loc[d:, :] = 0
-            weights.loc[d:, chosen] = 1 / len(chosen)
-
-    port_ret = (weights.shift(1).fillna(0) * returns).sum(axis=1)
-    out = pd.DataFrame({"ALS Momentum": (1 + port_ret).cumprod(), "SPY": (1 + spy_ret).cumprod()})
-    stats = performance_stats(out)
-    return out, stats
+        text = st.sidebar.text_area("הדבק טיקרים, מופרדים בפסיק", "AAPL,MSFT,NVDA,META")
+        tickers = [x.strip().upper() for x in text.replace("\n", ",").split(",") if x.strip()]
+    return tickers[:max_tickers]
 
 
-def performance_stats(equity: pd.DataFrame) -> pd.DataFrame:
+def screener_tab(api_key: str, mode: str, source: str, max_tickers: int, thresholds: Dict[str, float]):
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Mode", mode)
+    col2.metric("מקור נתונים", "FMP")
+    col3.metric("עדכון", datetime.now().strftime("%d/%m/%Y %H:%M"))
+
+    if not api_key:
+        st.info("הכנס FMP API Key בצד שמאל או ב-Streamlit Secrets בשם FMP_API_KEY.")
+        return
+
+    tickers = get_tickers(source, api_key, max_tickers)
+    st.metric("טיקרים לסריקה", len(tickers))
+    run = st.button("סרוק מניות", type="primary")
+    if not run:
+        st.caption("המידע לצורכי מחקר בלבד ואינו המלצת השקעה.")
+        return
+    if not tickers:
+        st.warning("לא נמצאו טיקרים לסריקה.")
+        return
+
+    progress = st.progress(0)
+    status = st.empty()
     rows = []
-    for col in equity.columns:
-        s = equity[col].dropna()
-        if len(s) < 2:
-            continue
-        total = s.iloc[-1] / s.iloc[0] - 1
-        years = max((s.index[-1] - s.index[0]).days / 365.25, 0.01)
-        cagr = (s.iloc[-1] / s.iloc[0]) ** (1 / years) - 1
-        daily = s.pct_change().dropna()
-        vol = daily.std() * np.sqrt(252) if len(daily) else np.nan
-        sharpe = (daily.mean() * 252) / vol if vol and vol > 0 else np.nan
-        dd = s / s.cummax() - 1
-        rows.append({"מדד": col, "Total Return %": total * 100, "CAGR %": cagr * 100, "Volatility %": vol * 100, "Sharpe": sharpe, "Max Drawdown %": dd.min() * 100})
-    return pd.DataFrame(rows)
+    try:
+        quotes = fetch_quote_batch(tuple(tickers), api_key)
+        for i, sym in enumerate(tickers, start=1):
+            status.write(f"סורק {sym} ({i}/{len(tickers)})...")
+            cd = fetch_company_data(sym, api_key)
+            row = build_row(sym, quotes.get(sym, {}), cd)
+            rows.append(row)
+            progress.progress(i / len(tickers))
+    except Exception as e:
+        st.error(f"שגיאה במשיכת נתונים: {e}")
+        return
+
+    df = pd.DataFrame(rows)
+    df["Pass"] = df.apply(lambda r: passes_mode(r, mode, thresholds), axis=1)
+    passed = df[df["Pass"]].sort_values("Amir Score", ascending=False)
+    st.success(f"הסריקה הסתיימה. עברו את מצב {mode}: {len(passed)} מתוך {len(df)}")
+
+    show_all = st.checkbox("הצג גם מניות שלא עברו", value=(len(passed) == 0))
+    result = df.sort_values("Amir Score", ascending=False) if show_all else passed
+    st.session_state["last_results"] = result
+
+    cols = ["Ticker", "Company", "Amir Score", "Recommendation", "Risk Flags", "Price", "P/E", "Forward P/E*", "P/S", "Quick Ratio", "ROE %", "ROIC/ROI %", "Gross Margin %", "Profit Margin %", "Revenue Growth %", "EPS", "Forward EPS*", "Above MA50", "Above MA200"]
+    st.dataframe(result[cols], use_container_width=True, height=520)
+    st.caption("* Forward EPS / Forward P/E מחושבים בקירוב לפי EPS Growth כאשר אין תחזית אנליסטים זמינה ב-FMP.")
+
+    xlsx = dataframe_to_excel_bytes(result)
+    st.download_button("הורד Excel", data=xlsx, file_name="als_results.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    if not result.empty:
+        pick = st.selectbox("כרטיס מניה", result["Ticker"].tolist())
+        r = result[result["Ticker"] == pick].iloc[0]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Amir Score", r["Amir Score"])
+        c2.metric("Quality", r["Quality"])
+        c3.metric("Growth", r["Growth"])
+        c4.metric("Trend", r["Trend"])
+        st.write("**חוזקות / חולשות:**")
+        strengths = []
+        if r.get("ROE %", 0) >= 30: strengths.append("ROE גבוה מאוד")
+        if r.get("Gross Margin %", 0) >= 45: strengths.append("Gross Margin חזק")
+        if r.get("Profit Margin %", 0) >= 20: strengths.append("Profit Margin גבוה")
+        if r.get("Above MA50"): strengths.append("מחיר מעל MA50")
+        if r.get("P/E", 0) > r.get("Forward P/E*", 999): strengths.append("Forward P/E נמוך מ-P/E")
+        st.write("✅ " + ", ".join(strengths) if strengths else "אין חוזקות חריגות לפי הכללים")
+        st.write("⚠️ " + (r.get("Risk Flags") or "אין דגלי סיכון מרכזיים"))
 
 
-st.title("ALS Stock Finder — Amir Logic Screener")
-st.caption("v0.2 — סקרינר + מצבי סינון + Backtest בסיסי")
+def backtest_tab(api_key: str):
+    st.subheader("Backtest Lab בסיסי")
+    st.warning("גרסה זו בודקת ביצועים היסטוריים של רשימת מניות שנבחרה היום. זה עדיין לא Point-in-Time מלא, ולכן יש הטיית הישרדות/מידע. ב-v1 נבנה Backtest אמיתי יותר.")
+    if not api_key:
+        st.info("הכנס FMP API Key כדי להריץ בדיקה.")
+        return
+    default_symbols = []
+    if "last_results" in st.session_state and not st.session_state["last_results"].empty:
+        default_symbols = st.session_state["last_results"].head(10)["Ticker"].tolist()
+    text = st.text_area("טיקרים לבדיקה", ",".join(default_symbols or ["AAPL", "MSFT", "NVDA"]))
+    symbols = [s.strip().upper() for s in text.replace("\n", ",").split(",") if s.strip()]
+    start = st.date_input("תאריך התחלה", value=datetime.now().date() - timedelta(days=365))
+    end = st.date_input("תאריך סיום", value=datetime.now().date())
+    benchmark = st.text_input("Benchmark", value="SPY")
+    if st.button("הרץ Backtest בסיסי"):
+        if not symbols:
+            st.warning("אין טיקרים")
+            return
+        rows = []
+        series = []
+        for sym in symbols + [benchmark.upper()]:
+            df = historical_prices(sym, api_key, str(start), str(end))
+            if df.empty:
+                continue
+            first, last = df["close"].iloc[0], df["close"].iloc[-1]
+            ret = (last / first - 1) * 100
+            rows.append({"Ticker": sym, "Return %": round(ret, 2), "Start": first, "End": last})
+            df["norm"] = df["close"] / first * 100
+            df["Ticker"] = sym
+            series.append(df)
+        if rows:
+            res = pd.DataFrame(rows)
+            st.dataframe(res, use_container_width=True)
+            if series:
+                chart = pd.concat(series)
+                fig = px.line(chart, x="date", y="norm", color="Ticker", title="Normalized return: 100 = start")
+                st.plotly_chart(fig, use_container_width=True)
 
-tab1, tab2 = st.tabs(["🔎 Screener", "🧪 Backtest Lab"])
 
-with tab1:
-    with st.sidebar:
-        st.header("הגדרות")
-        api_key = st.text_input("FMP API Key", type="password")
-        st.subheader("סגנון סינון")
-        mode = st.radio("Mode", ["Strict", "Balanced", "Opportunistic"], index=1)
-        st.caption("Strict = קשיח; Balanced = מומלץ; Opportunistic = יותר תוצאות עם יותר סיכון")
+def main():
+    st.title("ALS Stock Finder — Amir Logic Screener")
+    st.caption("v0.3 — S&P 500 + Amir Score + מצבי סינון + Backtest בסיסי")
+    api_key, mode, source, max_tickers, thresholds = app_sidebar()
+    tab1, tab2 = st.tabs(["🔎 Screener", "🧪 Backtest Lab"])
+    with tab1:
+        screener_tab(api_key, mode, source, max_tickers, thresholds)
+    with tab2:
+        backtest_tab(api_key)
 
-        st.subheader("יקום מניות")
-        input_mode = st.radio("מקור טיקרים", ["רשימת דוגמה", "הדבקה ידנית", "העלאת CSV"])
-        tickers = DEFAULT_TICKERS.copy()
-        if input_mode == "הדבקה ידנית":
-            raw = st.text_area("הדבק טיקרים, מופרדים בפסיק או שורה", "AAPL,MSFT,NVDA,META,GOOGL")
-            tickers = [x.strip().upper() for x in raw.replace("\n", ",").split(",") if x.strip()]
-        elif input_mode == "העלאת CSV":
-            f = st.file_uploader("CSV עם עמודה symbol או ticker", type=["csv"])
-            if f:
-                tmp = pd.read_csv(f)
-                col = "symbol" if "symbol" in tmp.columns else "ticker" if "ticker" in tmp.columns else tmp.columns[0]
-                tickers = tmp[col].dropna().astype(str).str.upper().tolist()
 
-        max_tickers = st.slider("מספר טיקרים לסריקה", 1, min(300, len(tickers)), min(30, len(tickers)))
-        tickers = tickers[:max_tickers]
-
-        st.subheader("רפי איכות")
-        min_quick_ratio = st.number_input("Quick Ratio מינימלי", value=1.0, step=0.1)
-        min_roe = st.number_input("ROE מינימלי %", value=12.0, step=1.0)
-        min_roic = st.number_input("ROIC/ROI מינימלי %", value=9.0, step=1.0)
-        min_gross_margin = st.number_input("Gross Margin מינימלי %", value=38.0, step=1.0)
-        min_profit_margin = st.number_input("Profit Margin מינימלי %", value=7.0, step=1.0)
-
-    cfg = dict(min_quick_ratio=min_quick_ratio, min_roe=min_roe, min_roic=min_roic, min_gross_margin=min_gross_margin, min_profit_margin=min_profit_margin)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("טיקרים לסריקה", len(tickers))
-    c2.metric("Mode", mode)
-    c3.metric("מקור נתונים", "FMP")
-    c4.metric("עדכון", datetime.now().strftime("%d/%m/%Y %H:%M"))
-
-    if st.button("סרוק מניות", type="primary"):
-        if not api_key:
-            st.error("צריך להכניס FMP API Key בצד שמאל.")
-        else:
-            rows = []
-            progress = st.progress(0)
-            status = st.empty()
-            for i, sym in enumerate(tickers, start=1):
-                status.write(f"סורק {sym} ({i}/{len(tickers)})...")
-                try:
-                    rows.append(get_symbol_data(sym, api_key))
-                    time.sleep(0.12)
-                except Exception as e:
-                    rows.append({"Ticker": sym, "Error": str(e)})
-                progress.progress(i / len(tickers))
-
-            df = pd.DataFrame(rows)
-            for c in ["ROE", "ROIC/ROI", "Gross Margin", "Operating Margin", "Profit Margin"]:
-                if c in df.columns:
-                    df[c + " %"] = df[c].apply(pct)
-            df["Amir Score"] = df.apply(score_row, axis=1)
-            df["Risk Flags"] = df.apply(risk_flags, axis=1)
-            df["Pass"] = df.apply(lambda r: pass_filters(r, cfg, mode), axis=1)
-            df["Recommendation"] = df.apply(lambda r: recommendation(r["Amir Score"], r["Risk Flags"], mode), axis=1)
-            df = df.sort_values(["Pass", "Amir Score"], ascending=[False, False])
-            passed = df[df["Pass"] == True].copy()
-
-            st.success(f"הסריקה הסתיימה. נכנסו לפי {mode}: {len(passed)} מתוך {len(df)}")
-            show_cols = [c for c in ["Ticker", "Company", "Sector", "Price", "Amir Score", "Recommendation", "Risk Flags", "P/E", "Forward P/E", "P/S", "Quick Ratio", "ROE %", "ROIC/ROI %", "Gross Margin %", "Profit Margin %", "EPS", "Forward EPS", "Above MA50", "Above MA200"] if c in df.columns]
-            st.subheader("תוצאות")
-            st.dataframe(passed[show_cols], use_container_width=True)
-            st.download_button("הורד Excel", data=to_excel(df), file_name="als_results_v02.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            with st.expander("כל המניות שנסרקו"):
-                st.dataframe(df[show_cols + (["Error"] if "Error" in df.columns else [])], use_container_width=True)
-    else:
-        st.info("הכנס FMP API Key ולחץ 'סרוק מניות'. מומלץ להתחיל ב-Balanced כדי לא לקבל טבלה ריקה.")
-
-with tab2:
-    st.subheader("Backtest Lab — גרסה ראשונה")
-    st.warning("הבדיקה כאן היא Backtest בסיסי של רכיב המומנטום בלבד: מחיר מעל MA50 ו-MA50 עולה. Backtest מלא של כל הפקטורים הפונדמנטליים דורש נתוני עבר נקודתיים כדי למנוע הצצה לעתיד.")
-    colA, colB = st.columns(2)
-    with colA:
-        raw_bt = st.text_area("טיקרים לבדיקה", "AAPL,MSFT,NVDA,META,GOOGL,AMZN,AVGO,COST,AMD,NFLX")
-        bt_tickers = [x.strip().upper() for x in raw_bt.replace("\n", ",").split(",") if x.strip()]
-        start = st.date_input("תאריך התחלה", pd.to_datetime("2020-01-01"))
-    with colB:
-        end = st.date_input("תאריך סיום", pd.to_datetime(datetime.today().date()))
-        ma_window = st.number_input("ממוצע נע", value=50, min_value=20, max_value=200, step=10)
-        rebalance = st.radio("איזון מחדש", ["חודשי", "רבעוני"], index=0)
-        top_n = st.number_input("מספר מניות מקסימלי בתיק", value=10, min_value=1, max_value=50)
-
-    if st.button("הרץ Backtest", type="primary"):
-        if yf is None:
-            st.error("חסר yfinance. ודא שהקובץ requirements.txt כולל yfinance.")
-        else:
-            try:
-                equity, stats = backtest_momentum(bt_tickers, str(start), str(end), int(ma_window), rebalance, int(top_n))
-                if equity.empty:
-                    st.error("לא התקבלו נתונים לבדיקה.")
-                else:
-                    st.line_chart(equity)
-                    st.subheader("מדדי ביצוע")
-                    st.dataframe(stats.round(2), use_container_width=True)
-            except Exception as e:
-                st.error(f"שגיאה בהרצת Backtest: {e}")
-
-st.caption("המידע לצורכי מחקר בלבד ואינו המלצת השקעה.")
+if __name__ == "__main__":
+    main()

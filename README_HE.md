@@ -1,24 +1,44 @@
-# ALS Stock Finder v0.2
+# ALS Stock Finder v0.3
 
-גרסה זו כוללת:
-- חיבור ל-FMP לסקרינר בסיסי
+גרסה זו מוסיפה:
+
+- בחירת יקום מניות: רשימת דוגמה / S&P 500 דרך FMP / העלאת CSV / הדבקה ידנית
 - שלושה מצבי סינון: Strict / Balanced / Opportunistic
-- Amir Score
+- Amir Score מפורק ל-Quality / Growth / Valuation / Trend
+- Risk Flags ו-Recommendation
+- כרטיס מניה בסיסי
 - ייצוא לאקסל
-- Backtest בסיסי למומנטום/מחיר מול SPY באמצעות yfinance
+- Backtest Lab בסיסי
 
-## הפעלה ב-Streamlit
-העלה ל-GitHub את הקבצים:
-- app.py
-- requirements.txt
-- tickers_sample.csv
-- README_HE.md
+## איך לעדכן את Streamlit
 
-ב-Streamlit ודא:
-- Repository: הריפוזיטורי שלך
-- Branch: main
-- Main file path: app.py
+1. חלץ את קובץ ה-ZIP.
+2. היכנס ל-GitHub repository שלך.
+3. לחץ Add file → Upload files.
+4. גרור את הקבצים:
+   - app.py
+   - requirements.txt
+   - README_HE.md
+   - tickers_sample.csv
+5. לחץ Commit changes.
+6. ב-Streamlit לחץ Reboot app אם לא התעדכן לבד.
+
+## API Key
+
+עדיף לשמור את המפתח ב-Streamlit Secrets:
+
+```toml
+FMP_API_KEY = "your_key_here"
+```
+
+אפשר גם להזין אותו בשדה בצד שמאל, אבל אל תשתף אותו עם אף אחד.
 
 ## הערה חשובה על Backtest
-ה-Backtest בגרסה זו בודק את רכיב המומנטום/מחיר בלבד: מחיר מעל MA50 ו-MA50 עולה.
-Backtest מלא של כל הפקטורים הפונדמנטליים דורש נתונים היסטוריים נקודתיים (Point-in-Time) כדי למנוע Look-Ahead Bias.
+
+ה-Backtest בגרסה זו הוא בסיסי בלבד. הוא בודק ביצועים היסטוריים של טיקרים שנבחרו היום. זה עדיין לא Point-in-Time מלא ולכן קיימת הטיית הישרדות/מידע. בגרסה מתקדמת נבנה מנגנון היסטורי אמיתי.
+
+## הערה על Forward EPS / Forward P/E
+
+אם FMP לא מספק תחזית אנליסטים זמינה בתוכנית שלך, האפליקציה מחשבת קירוב לפי EPS Growth. העמודות מסומנות בכוכבית.
+
+המידע לצורכי מחקר בלבד ואינו המלצת השקעה.
