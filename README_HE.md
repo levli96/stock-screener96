@@ -1,33 +1,24 @@
-# ALS Stock Finder FMP v0.1
+# ALS Stock Finder v0.2
 
-גרסה ראשונה של מנוע חיפוש מניות עם ממשק Streamlit ונתוני Financial Modeling Prep.
+גרסה זו כוללת:
+- חיבור ל-FMP לסקרינר בסיסי
+- שלושה מצבי סינון: Strict / Balanced / Opportunistic
+- Amir Score
+- ייצוא לאקסל
+- Backtest בסיסי למומנטום/מחיר מול SPY באמצעות yfinance
 
-## מה צריך לפני ההפעלה
-1. חשבון ב-Financial Modeling Prep.
-2. API Key.
-3. התקנת Python במחשב, או הרצה ב-Google Colab / Streamlit Cloud.
+## הפעלה ב-Streamlit
+העלה ל-GitHub את הקבצים:
+- app.py
+- requirements.txt
+- tickers_sample.csv
+- README_HE.md
 
-## הפעלה מקומית
-פתח תיקייה זו ב-Terminal / CMD והריץ:
+ב-Streamlit ודא:
+- Repository: הריפוזיטורי שלך
+- Branch: main
+- Main file path: app.py
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-לאחר מכן ייפתח הדפדפן בכתובת מקומית.
-
-## שימוש
-1. הדבק את ה-API Key בצד שמאל.
-2. בחר רשימת טיקרים: ברירת מחדל, העלאת CSV, או רשימה ידנית.
-3. שנה את הספים לפי השיטה שלך.
-4. לחץ "סרוק מניות".
-5. הורד את התוצאות ל-Excel.
-
-## CSV לדוגמה
-הקובץ `tickers_sample.csv` מכיל עמודה בשם `symbol`.
-
-## הערות חשובות
-- המידע הוא לצורכי מחקר בלבד ואינו המלצת השקעה.
-- איכות הנתונים תלויה ב-FMP ובמסלול המנוי.
-- בתוכנית חינמית ייתכנו מגבלות יומיות ולכן מומלץ להתחיל עם רשימת טיקרים קצרה.
+## הערה חשובה על Backtest
+ה-Backtest בגרסה זו בודק את רכיב המומנטום/מחיר בלבד: מחיר מעל MA50 ו-MA50 עולה.
+Backtest מלא של כל הפקטורים הפונדמנטליים דורש נתונים היסטוריים נקודתיים (Point-in-Time) כדי למנוע Look-Ahead Bias.
