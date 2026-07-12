@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -9,7 +9,7 @@ from config import FMP_BASE_URL
 
 
 class FMPError(RuntimeError):
-    """Readable error returned by the FMP service."""
+    pass
 
 
 @dataclass
@@ -22,7 +22,7 @@ class FMPClient:
         if not self.api_key:
             raise FMPError("חסר FMP API Key")
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "Levli/0.5"})
+        self.session.headers.update({"User-Agent": "Levli-Beta1/1.0"})
 
     def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Any:
         query = dict(params or {})
@@ -34,17 +34,15 @@ class FMPClient:
             raise FMPError(f"שגיאת תקשורת מול FMP: {exc}") from exc
 
         if response.status_code == 401:
-            raise FMPError(
-                "FMP דחה את המפתח (401). ודא שהדבקת את ה-API Key האמיתי ולא את טקסט הדוגמה."
-            )
+            raise FMPError("FMP החזיר 401. בדוק שהמפתח הוזן במלואו.")
         if response.status_code == 403:
-            raise FMPError("ה-endpoint אינו כלול כנראה בחבילת FMP שלך (403).")
+            raise FMPError(f"אין הרשאה ל-endpoint: {endpoint} (403)")
         if response.status_code == 429:
-            raise FMPError("חרגת ממכסת הקריאות היומית של FMP (429).")
+            raise FMPError("מכסת הקריאות היומית של FMP הסתיימה (429).")
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
-            raise FMPError(f"שגיאת FMP {response.status_code}: {response.text[:180]}") from exc
+            raise FMPError(f"FMP {response.status_code}: {response.text[:180]}") from exc
 
         try:
             data = response.json()
@@ -57,36 +55,31 @@ class FMPClient:
                 raise FMPError(str(message))
         return data
 
+    def first(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        data = self.get(endpoint, params)
+        if isinstance(data, list) and data:
+            return data[0] if isinstance(data[0], dict) else {}
+        return data if isinstance(data, dict) else {}
+
     def validate_key(self) -> bool:
-        data = self.get("quote-short", {"symbol": "AAPL"})
-        return isinstance(data, list) and len(data) > 0
+        data = self.get("income-statement", {"symbol": "AAPL", "limit": 1})
+        return isinstance(data, list) and bool(data)
 
-    def constituents(self, endpoint: str) -> List[Dict[str, Any]]:
-        data = self.get(endpoint)
-        return data if isinstance(data, list) else []
-
-    def batch_quotes(self, symbols: Iterable[str]) -> List[Dict[str, Any]]:
-        joined = ",".join(symbols)
-        if not joined:
-            return []
-        data = self.get("batch-quote", {"symbols": joined})
-        return data if isinstance(data, list) else []
+    def quote(self, symbol: str) -> Dict[str, Any]:
+        return self.first("quote", {"symbol": symbol})
 
     def ratios_ttm(self, symbol: str) -> Dict[str, Any]:
-        data = self.get("ratios-ttm", {"symbol": symbol})
-        return data[0] if isinstance(data, list) and data else {}
+        return self.first("ratios-ttm", {"symbol": symbol})
 
     def key_metrics_ttm(self, symbol: str) -> Dict[str, Any]:
-        data = self.get("key-metrics-ttm", {"symbol": symbol})
-        return data[0] if isinstance(data, list) and data else {}
+        return self.first("key-metrics-ttm", {"symbol": symbol})
 
-    def financial_growth(self, symbol: str) -> Dict[str, Any]:
-        data = self.get("financial-growth", {"symbol": symbol, "limit": 1})
-        return data[0] if isinstance(data, list) and data else {}
+    def income_growth(self, symbol: str) -> Dict[str, Any]:
+        return self.first("income-statement-growth", {"symbol": symbol, "limit": 1})
 
     def analyst_estimates(self, symbol: str) -> List[Dict[str, Any]]:
         data = self.get(
             "analyst-estimates",
-            {"symbol": symbol, "period": "annual", "page": 0, "limit": 3},
+            {"symbol": symbol, "period": "annual", "page": 0, "limit": 10},
         )
-        return data if isinstance(data, list) else []
+        return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
