@@ -1,27 +1,17 @@
-# Levli Beta 1
+# Levli Beta 1.1
 
-גרסה ממוקדת שנועדה להוכיח שהמערכת עובדת מקצה לקצה על 30 מניות אמיתיות.
+גרסת תיקון ממוקדת לקריסת הסריקה.
 
-## מה היא עושה
-- בדיקת API Key באמצעות endpoint של Income Statement שכבר אומת בחשבון.
-- סריקה של 5–30 מניות מקובץ `tickers_30.csv`.
-- שימוש ב-endpoints הרשמיים של FMP Stable:
-  - `quote`
-  - `ratios-ttm`
-  - `key-metrics-ttm`
-  - `income-statement-growth`
-  - `analyst-estimates`
-- סינון לפי כללי Levli.
-- Levli Score בכוכבים.
-- ייצוא ל-Excel.
+שינויים בלבד:
+- הוסרו pandas, openpyxl ו-pyarrow מהנתיב הפעיל.
+- הוסר cache של Streamlit.
+- הטבלה מוצגת כ-HTML פשוט.
+- הייצוא הוא CSV במקום Excel בגרסת הבדיקה.
+- מתחילים בסריקה של מניה אחת.
 
-## העלאה ל-GitHub
-העלה את הקבצים עצמם לשורש ה-repository, לא את התיקייה כולה.
-
-## Streamlit
-Main file path: `app.py`
-
-אחרי Commit בצע Reboot app.
-
-## הערה על מכסת FMP
-סריקה של 30 מניות צורכת עד כ-150 קריאות לפני Cache. מומלץ להתחיל ב-5 מניות ולעלות ל-30 לאחר שהבדיקה מצליחה.
+## בדיקה
+1. העלה את כל הקבצים לשורש ה-Repository.
+2. בצע Reboot ב-Streamlit.
+3. בדוק API Key.
+4. סרוק מניה אחת.
+5. אם הצליח, עבור ל-5 מניות.

@@ -1,5 +1,5 @@
-APP_TITLE = "Levli Beta 1"
-APP_SUBTITLE = "Fundamental Quality Filter — 30-stock working test"
+APP_TITLE = "Levli Beta 1.1"
+APP_SUBTITLE = "Fundamental Quality Filter — stability fix"
 FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 
 MIN_QUICK_RATIO = 1.0
