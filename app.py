@@ -10,7 +10,7 @@ import streamlit as st
 
 from config import APP_SUBTITLE, APP_TITLE
 from fmp_api import FMPClient, FMPError
-from screening import build_row, passes_mandatory_screen
+from screening import build_row, diagnostic_row, passes_mandatory_screen
 
 st.set_page_config(page_title=APP_TITLE, page_icon="⭐", layout="wide")
 
@@ -85,11 +85,11 @@ def csv_bytes(rows: list[dict[str, Any]], columns: list[str]) -> bytes:
 
 st.title(APP_TITLE)
 st.caption(APP_SUBTITLE)
-st.info("גרסת יציבות: ללא pandas, ללא openpyxl וללא cache. המטרה היחידה היא שהסריקה תעבוד.")
+st.info("גרסת בדיקה ממוקדת: סריקה יציבה + הסבר ברור אילו תנאי חובה עברו או נכשלו.")
 
 api_key = st.sidebar.text_input("FMP API Key", value=saved_key(), type="password", placeholder="הדבק כאן את המפתח")
-scan_count = st.sidebar.select_slider("מספר מניות לסריקה", options=[1, 3, 5, 10, 20, 30], value=1)
-st.sidebar.caption("התחל במניה אחת. אם עובד, עבור ל-5 ואז ל-30.")
+scan_count = st.sidebar.select_slider("מספר מניות לסריקה", options=[1, 3, 5, 10, 20, 30], value=10)
+st.sidebar.caption("ברירת המחדל היא 10 מניות. אפשר להרחיב בהדרגה עד 30.")
 
 if not api_key:
     st.warning("הזן את מפתח FMP בצד שמאל.")
@@ -114,6 +114,7 @@ m2.metric("זמן", datetime.now().strftime("%d/%m/%Y %H:%M"))
 if st.button("סרוק", type="primary"):
     results: list[dict[str, Any]] = []
     diagnostics: list[dict[str, str]] = []
+    screen_details: list[dict[str, Any]] = []
     progress = st.progress(0)
     status = st.empty()
 
@@ -121,6 +122,7 @@ if st.button("סרוק", type="primary"):
         status.info(f"בודק {symbol} ({i}/{len(symbols)})")
         try:
             row = scan_symbol(api_key, symbol)
+            screen_details.append(diagnostic_row(row))
             if passes_mandatory_screen(row):
                 results.append(row)
             diagnostics.append({"Ticker": symbol, "Status": "OK"})
@@ -145,11 +147,21 @@ if st.button("סרוק", type="primary"):
         st.download_button(
             "הורד CSV",
             data=csv_bytes(results, columns),
-            file_name="levli_beta1_1_results.csv",
+            file_name="levli_beta1_2_results.csv",
             mime="text/csv",
         )
     else:
         st.info("לא נמצאו מניות שעברו את כל תנאי החובה. הסריקה עצמה הסתיימה בהצלחה.")
+
+
+    st.subheader("בדיקת תנאי החובה")
+    if screen_details:
+        diagnostic_columns = [
+            "Ticker", "Company", "Passed", "Price > MA50", "MA50 Rising",
+            "P/E > Fwd P/E", "Quick > 1", "ROE ≥ 12%", "ROIC ≥ 9%",
+            "GM ≥ 38%", "PM ≥ 7%", "Failed Criteria",
+        ]
+        render_html_table(screen_details, diagnostic_columns)
 
     errors = [row for row in diagnostics if row["Status"] != "OK"]
     if errors:
